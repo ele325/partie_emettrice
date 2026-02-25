@@ -1,0 +1,9 @@
+{
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
+    "idf.espIdfPath": "C:/Espressif/frameworks/esp-idf-v5.x",
+    "idf.toolsPath": "C:/Espressif/tools",
+    "idf.pythonBinPath": "C:/Espressif/python_env/idf5.x_py3.x_env/Scripts/python.exe",
+    "idf.customExtraPaths": "",
+    "C_Cpp.intelliSenseEngine": "default",
+    "idf.currentSetup": "C:\\esp\\v5.5.2\\esp-idf"
+}
