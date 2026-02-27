@@ -1,9 +1,13 @@
 #include <stdio.h>
+#include <stdbool.h>
+#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
-#include "esp_timer.h"
+#include "driver/spi_master.h"
+#include "driver/gpio.h"
 
+// Gestionnaires de périphériques
 #include "rtc_manager.h"
 #include "bgt_sensor_manager.h"
 #include "sd_manager.h"
@@ -12,111 +16,105 @@
 
 static const char *TAG = "MAIN_CAPTEUR";
 
-// Configuration des broches
-#define LORA_CS     10
-#define LORA_RST    6
-#define LORA_IRQ    5
-#define SD_CS       12
-#define SCK         7
-#define MISO        9
-#define MOSI        11
+/**
+ * CONFIGURATION DES PINS - STRICTEMENT BASÉE SUR L'ANALYSE CSV & SCHÉMA
+ */
 
-#define MODBUS_RX   4
-#define MODBUS_TX   3
-#define MODBUS_EN   2
+// --- BUS SPI (Partagé entre LoRa Ra-01 et Carte SD) ---
+#define SPI_MOSI      11  // IO11
+#define SPI_MISO      13  // IO13
+#define SPI_SCLK      12  // IO12 (Marqué CLK)
+#define SD_CS         34  // IO34 (Chip Select Carte SD)
+#define LORA_CS       14  // IO14 (NSS / Chip Select LoRa)
 
-#define I2C_SDA     8
-#define I2C_SCL     13
+// --- MODULE LORA (Signaux additionnels) ---
+#define LORA_RST      10  // IO10 (D'après Analyse Pin_last.csv)
+#define LORA_IRQ      -1  // À définir si une interruption est câblée (souvent IO5 ou IO15)
 
-#define NODE_ID     1
-#define SLEEP_TIME_US (14400 * 1000000ULL)  // 4 heures en microsecondes
+// --- BUS I2C (Horloge RTC DS3231MZ) ---
+#define I2C_SDA       21  // IO21
+#define I2C_SCL       26  // IO26
+
+// --- UART / MODBUS (Capteur BGT-SMPS) ---
+#define MODBUS_RX     17  // IO17
+#define MODBUS_TX     18  // IO18
+#define MODBUS_EN     19  // IO19 (Utilisé comme GPIO Input/Output sur schéma)
+
+// --- PARAMÈTRES SYSTÈME ---
+#define NODE_ID       1
+#define SLEEP_TIME_US (14400 * 1000000ULL) // 4 heures en microsecondes
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Démarrage capteur BGT-SMPS (ID: %d)", NODE_ID);
-    
-    // 1. Initialiser le bus SPI (partagé entre LoRa et SD)
+    ESP_LOGI(TAG, "Démarrage Node ID: %d", NODE_ID);
+
+    // 1. Initialisation du Bus SPI commun
+    // L'ESP32-S2 utilise le SPI2_HOST pour les pins personnalisés
     spi_bus_config_t bus_cfg = {
-        .mosi_io_num = MOSI,
-        .miso_io_num = MISO,
-        .sclk_io_num = SCK,
+        .mosi_io_num = SPI_MOSI,
+        .miso_io_num = SPI_MISO,
+        .sclk_io_num = SPI_SCLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
         .max_transfer_sz = 4000,
     };
-    
+
     esp_err_t ret = spi_bus_initialize(SPI2_HOST, &bus_cfg, SPI_DMA_CH_AUTO);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Erreur initialisation SPI: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Erreur fatale initialisation SPI: %s", esp_err_to_name(ret));
     }
-    
-    // 2. Initialiser le RTC
-    if (!rtc_manager_init(I2C_SDA, I2C_SCL)) {
-        ESP_LOGW(TAG, "RTC non détecté, horodatage indisponible");
-    }
-    
-    // 3. Initialiser la carte SD
-    if (!sd_manager_init(SD_CS)) {
-        ESP_LOGW(TAG, "Carte SD non détectée");
-    }
-    
-    // 4. Initialiser le capteur BGT-SMPS
-    if (!bgt_sensor_manager_init(MODBUS_RX, MODBUS_TX, MODBUS_EN, 1)) {
-        ESP_LOGE(TAG, "Échec initialisation capteur BGT-SMPS");
-    }
-    
-    // 5. Laisser le temps au capteur de démarrer
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    
-    // 6. Lire les données du capteur
-    bgt_sensor_data_t sensor_data = {0};
-    bool read_success = bgt_sensor_manager_read_all(&sensor_data);
-    
-    if (read_success) {
-        ESP_LOGI(TAG, "Lecture capteur réussie");
+
+    // 2. Initialisation du RTC DS3231 (I2C)
+    if (rtc_manager_init(I2C_SDA, I2C_SCL)) {
+        ESP_LOGI(TAG, "RTC prêt sur IO21/IO26");
     } else {
-        ESP_LOGE(TAG, "Échec lecture capteur");
+        ESP_LOGE(TAG, "RTC non détecté !");
     }
-    
-    // 7. Récupérer date/heure pour horodatage
-    datetime_t now;
-    bool rtc_ok = rtc_manager_get_datetime(&now);
-    
-    // 8. Enregistrer sur SD
-    if (rtc_ok) {
-        sd_manager_log_sensor_data(&now, &sensor_data);
+
+    // 3. Initialisation de la Carte SD (SPI)
+    if (sd_manager_init(SD_CS)) {
+        ESP_LOGI(TAG, "Carte SD montée avec succès sur IO34");
     } else {
-        ESP_LOGW(TAG, "Pas d'horodatage - données non enregistrées sur SD");
+        ESP_LOGW(TAG, "Échec montage Carte SD");
     }
-    
-    // 9. Initialiser LoRa
-    if (lora_manager_init(MOSI, MISO, SCK, LORA_CS, LORA_RST, LORA_IRQ)) {
+
+    // 4. Initialisation du capteur Modbus
+    if (bgt_sensor_manager_init(MODBUS_RX, MODBUS_TX, MODBUS_EN, 1)) {
         
-        // 10. Préparer et envoyer le message LoRa
-        char message[128];
-        bgt_sensor_manager_format_message(NODE_ID, &sensor_data, message, sizeof(message));
+        // Laisser le capteur se stabiliser après mise sous tension
+        vTaskDelay(pdMS_TO_TICKS(1000));
         
-        if (lora_manager_send_message(message)) {
-            ESP_LOGI(TAG, "Message LoRa envoyé avec succès");
+        bgt_sensor_data_t sensor_data = {0};
+        if (bgt_sensor_manager_read_all(&sensor_data)) {
+            ESP_LOGI(TAG, "Lecture capteur Modbus réussie");
+
+            // 5. Horodatage et stockage SD
+            datetime_t now;
+            if (rtc_manager_get_datetime(&now)) {
+                sd_manager_log_sensor_data(&now, &sensor_data);
+            }
+
+            // 6. Envoi des données par LoRa
+            // Note : On passe les pins SPI au manager pour configuration du device SPI LoRa
+            if (lora_manager_init(SPI_MOSI, SPI_MISO, SPI_SCLK, LORA_CS, LORA_RST, LORA_IRQ)) {
+                char message[128];
+                bgt_sensor_manager_format_message(NODE_ID, &sensor_data, message, sizeof(message));
+                
+                if (lora_manager_send_message(message)) {
+                    ESP_LOGI(TAG, "Transmission LoRa terminée");
+                } else {
+                    ESP_LOGE(TAG, "Erreur transmission LoRa");
+                }
+            }
         } else {
-            ESP_LOGE(TAG, "Échec envoi LoRa");
+            ESP_LOGE(TAG, "Capteur Modbus ne répond pas");
         }
-    } else {
-        ESP_LOGE(TAG, "Échec initialisation LoRa");
     }
-    
-    // 11. Attendre un peu pour que les logs série soient transmis
-    vTaskDelay(pdMS_TO_TICKS(100));
-    
-    // 12. Configurer et entrer en deep sleep
-    ESP_LOGI(TAG, "Cycle terminé, passage en deep sleep pour %llu secondes", 
-             SLEEP_TIME_US / 1000000);
+
+    // 7. Mise en sommeil profond (Deep Sleep)
+    ESP_LOGI(TAG, "Entrée en Deep Sleep pour 4h...");
+    vTaskDelay(pdMS_TO_TICKS(500)); // Laisse le temps aux logs série de sortir
     
     sleep_manager_configure_timer(SLEEP_TIME_US);
     sleep_manager_enter_deep_sleep();
-    
-    // Ne devrait jamais arriver ici
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
 }

@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 
 // Structure pour stocker toutes les données du capteur
 typedef struct {

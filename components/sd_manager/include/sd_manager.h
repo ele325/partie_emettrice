@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "rtc_manager.h"
+#include "bgt_sensor_manager.h"
 
 /**
  * @brief Initialise la carte SD
