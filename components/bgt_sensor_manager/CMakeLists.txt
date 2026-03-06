@@ -1,3 +1,10 @@
-idf_component_register(SRCS "bgt_sensor_manager.c"
-                    INCLUDE_DIRS "include"
-                    REQUIRES driver)
+idf_component_register(
+    SRCS
+        "bgt_sensor_manager.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        driver
+        freertos
+        log
+)
