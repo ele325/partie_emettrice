@@ -1,40 +1,3 @@
-/**
- * @file main.c
- * @brief Test DIAGNOSTIQUE complet — Capteur Sol NBL-S-TMC-7
- *        Projet RoboCare — Carte Émettrice ESP32-S2-WROOM-I
- *
- * ┌─────────────────────────────────────────────────────────────────┐
- * │  PinOut confirmé sur image A.5 de la carte émettrice            │
- * │                                                                 │
- * │  Ligne 20 : RX_UART CAPTEUR   → IO17  (IN/OUT)                 │
- * │  Ligne 21 : TX_UART CAPTEUR   → IO18  (IN/OUT)  ← pas IO20 !  │
- * │  Ligne 36 : OFF POWER 5V      → IO42  (OUTPUT)                 │
- * │                                                                 │
- * │  Transceiver embarqué : SN65HVD485E                             │
- * │    → DE/RE géré en interne : passer de_re_pin = -1              │
- * │                                                                 │
- * │  Câblage capteur NBL-S-TMC-7 (datasheet p.2) :                  │
- * │    Rouge  → 5V (IO42 ou alim externe 5-24V)                    │
- * │    Noir   → GND                                                 │
- * │    Jaune  → RS485 A+  (borne A+ du transceiver)                │
- * │    Bleu   → RS485 B-  (borne B- du transceiver)                │
- * └─────────────────────────────────────────────────────────────────┘
- *
- * ⚠️  ALIMENTATION CAPTEUR : 5V à 24V OBLIGATOIRE (jamais 3.3V !)
- *     → IO42 active la ligne "OFF POWER / ROLLING 5V POWER"
- *     → Sans cette alimentation = timeout systématique
- *
- * CE QUE CE TEST FAIT :
- *   1. Configure IO42 en sortie et active l'alim 5V capteur
- *   2. Initialise l'UART1 : TX=IO18, RX=IO17, 9600,8,N,1
- *   3. Envoie la trame Modbus : 01 03 00 00 00 07 44 0C
- *   4. Affiche la réponse brute HEX
- *   5. Vérifie CRC, décode et affiche les 7 paramètres
- *   6. Répète toutes les 2 secondes (≥ 1000ms requis par datasheet)
- *
- * COMPILATION ESP-IDF :
- *   idf.py build && idf.py -p /dev/ttyUSBx flash monitor
- */
 
 #include <stdio.h>
 #include <string.h>
@@ -46,11 +9,7 @@
 
 static const char *TAG = "ROBOCARE_CAPTEUR_SOL";
 
-/* ══════════════════════════════════════════════════════════════════
- *  CONFIGURATION — à ajuster si nécessaire
- * ══════════════════════════════════════════════════════════════════ */
 
-/* Broches UART capteur — confirmées sur pinout A.5 */
 #define SENSOR_RX_PIN      17    /* IO17 — Ligne 20 : RX_UART CAPTEUR    */
 #define SENSOR_TX_PIN      18    /* IO18 — Ligne 21 : TX_UART CAPTEUR    */
 #define SENSOR_DE_RE_PIN   (-1)  /* SN65HVD485E intégré → pas de DE/RE  */
@@ -100,8 +59,8 @@ static void sensor_power_init(void)
     gpio_set_level(SENSOR_POWER_PIN, 1);   /* Activer 5V */
     ESP_LOGI(TAG, "✓ Alimentation 5V capteur activée (IO%d)", SENSOR_POWER_PIN);
     vTaskDelay(pdMS_TO_TICKS(500));        /* Délai stabilisation capteur  */
-#else
-    ESP_LOGI(TAG, "Alimentation capteur externe (pas de broche configurée)");
+#else   
+    ESP_LOGI(TAG, "A  limentation capteur externe (pas de broche configurée)");
 #endif
 }
 
@@ -252,20 +211,17 @@ static void decode_and_print(const uint8_t *resp, int len)
     float potassium   = (float)raw[6];
 
     /* ── Affichage tableau ── */
-    ESP_LOGI(TAG, "┌──────────────────────────────────────────┐");
-    ESP_LOGI(TAG, "│     Données Capteur Sol NBL-S-TMC-7      │");
-    ESP_LOGI(TAG, "├──────────────────────────────────────────┤");
-    ESP_LOGI(TAG, "│  Température    : %6.1f °C              │", temperature);
-    ESP_LOGI(TAG, "│  Humidité       : %6.1f %%              │", humidity);
-    ESP_LOGI(TAG, "│  Conductivité   : %6.0f µS/cm          │", ec);
+    ESP_LOGI(TAG, "   Données Capteur Sol NBL-S-TMC-7      ");
+    ESP_LOGI(TAG, "  Température    : %6.1f °C              ", temperature);
+    ESP_LOGI(TAG, "  Humidité       : %6.1f %%              ", humidity);
+    ESP_LOGI(TAG, "  Conductivité   : %6.0f µS/cm          ", ec);
     if (ph < 0.0f)
-        ESP_LOGI(TAG, "│  pH             :   INVALIDE (0x7FFF)  │");
+        ESP_LOGI(TAG, "  pH             :   INVALIDE (0x7FFF)  ");
     else
-        ESP_LOGI(TAG, "│  pH             : %6.2f               │", ph);
-    ESP_LOGI(TAG, "│  Azote     (N)  : %6.0f mg/kg          │", nitrogen);
-    ESP_LOGI(TAG, "│  Phosphore (P)  : %6.0f mg/kg          │", phosphorus);
-    ESP_LOGI(TAG, "│  Potassium (K)  : %6.0f mg/kg          │", potassium);
-    ESP_LOGI(TAG, "└──────────────────────────────────────────┘");
+        ESP_LOGI(TAG, "  pH             : %6.2f               ", ph);
+    ESP_LOGI(TAG, " Azote     (N)  : %6.0f mg/kg          ", nitrogen);
+    ESP_LOGI(TAG, "  Phosphore (P)  : %6.0f mg/kg          ", phosphorus);
+    ESP_LOGI(TAG, "  Potassium (K)  : %6.0f mg/kg          ", potassium);
 
     /* ── Alertes plages datasheet ── */
     if (temperature < -40.0f || temperature > 80.0f)
@@ -288,31 +244,24 @@ static void print_troubleshoot(int err_count)
     /* Afficher au 1er échec, puis rappeler toutes les 10 erreurs */
     if (err_count != 1 && (err_count % 10) != 0) return;
 
-    ESP_LOGE(TAG, "╔══════════════════════════════════════════╗");
-    ESP_LOGE(TAG, "║  AUCUNE RÉPONSE (%2d erreur(s))           ║", err_count);
-    ESP_LOGE(TAG, "╠══════════════════════════════════════════╣");
-    ESP_LOGE(TAG, "║  1. ALIMENTATION CAPTEUR                 ║");
-    ESP_LOGE(TAG, "║     IO42 → 5V activé ? (gpio_set_level) ║");
-    ESP_LOGE(TAG, "║     Rouge = 5-24V | Noir = GND           ║");
-    ESP_LOGE(TAG, "║     ❌ Jamais 3.3V — min 5V requis        ║");
-    ESP_LOGE(TAG, "╠══════════════════════════════════════════╣");
-    ESP_LOGE(TAG, "║  2. CÂBLAGE RS485                        ║");
-    ESP_LOGE(TAG, "║     Jaune (capteur) → A+ transceiver     ║");
-    ESP_LOGE(TAG, "║     Bleu  (capteur) → B- transceiver     ║");
-    ESP_LOGE(TAG, "║     Si rien → inverser A+ et B-          ║");
-    ESP_LOGE(TAG, "╠══════════════════════════════════════════╣");
-    ESP_LOGE(TAG, "║  3. BROCHES UART (pinout A.5)            ║");
-    ESP_LOGE(TAG, "║     TX ESP32 = IO%d → DI transceiver     ║", SENSOR_TX_PIN);
-    ESP_LOGE(TAG, "║     RX ESP32 = IO%d → RO transceiver     ║", SENSOR_RX_PIN);
-    ESP_LOGE(TAG, "╠══════════════════════════════════════════╣");
-    ESP_LOGE(TAG, "║  4. ADRESSE MODBUS                       ║");
-    ESP_LOGE(TAG, "║     Défaut usine = 0x01                  ║");
-    ESP_LOGE(TAG, "║     Si modifiée → changer SENSOR_ADDR    ║");
-    ESP_LOGE(TAG, "╠══════════════════════════════════════════╣");
-    ESP_LOGE(TAG, "║  5. INTER-TRAME                          ║");
-    ESP_LOGE(TAG, "║     Datasheet impose ≥ 1000ms entre      ║");
-    ESP_LOGE(TAG, "║     deux communications (OK : 2000ms)    ║");
-    ESP_LOGE(TAG, "╚══════════════════════════════════════════╝");
+    ESP_LOGE(TAG, "AUCUNE RÉPONSE (%2d erreur(s))           ", err_count);
+    ESP_LOGE(TAG, "ALIMENTATION CAPTEUR  ");
+    ESP_LOGE(TAG, " IO42 → 5V activé ? (gpio_set_level) ");
+    ESP_LOGE(TAG, " Rouge = 5-24V | Noir = GND        ");
+    ESP_LOGE(TAG, "  ❌ Jamais 3.3V — min 5V requis   ");
+    ESP_LOGE(TAG, " CÂBLAGE RS485 ");
+    ESP_LOGE(TAG, " Jaune (capteur) → A+ transceiver   ");
+    ESP_LOGE(TAG, " Bleu  (capteur) → B- transceiver ");
+    ESP_LOGE(TAG, "Si rien → inverser A+ et B-    ");
+    ESP_LOGE(TAG, "BROCHES UART (pinout A.5)    ");
+    ESP_LOGE(TAG, "TX ESP32 = IO%d → DI transceiver", SENSOR_TX_PIN);
+    ESP_LOGE(TAG, "RX ESP32 = IO%d → RO transceiver ", SENSOR_RX_PIN);
+    ESP_LOGE(TAG, "ADRESSE MODBUS ");
+    ESP_LOGE(TAG, "Défaut usine = 0x01  ");
+    ESP_LOGE(TAG, "Si modifiée → changer SENSOR_ADDR  ");
+    ESP_LOGE(TAG, "INTER-TRAME ");
+    ESP_LOGE(TAG, "Datasheet impose ≥ 1000ms entre   ");
+    ESP_LOGE(TAG, "  deux communications (OK : 2000ms) ");
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -320,13 +269,11 @@ static void print_troubleshoot(int err_count)
  * ══════════════════════════════════════════════════════════════════ */
 void app_main(void)
 {
-    ESP_LOGI(TAG, "╔══════════════════════════════════════════╗");
-    ESP_LOGI(TAG, "║   RoboCare — Test Capteur Sol            ║");
-    ESP_LOGI(TAG, "║   NBL-S-TMC-7  Modbus RTU RS485          ║");
-    ESP_LOGI(TAG, "║   TX=IO%-2d  RX=IO%-2d  PWR=IO%-2d           ║",
+    ESP_LOGI(TAG, "RoboCare — Test Capteur Sol   ");
+    ESP_LOGI(TAG, " NBL-S-TMC-7  Modbus RTU RS485     ");
+    ESP_LOGI(TAG, "  TX=IO%-2d  RX=IO%-2d  PWR=IO%-2d           ",
              SENSOR_TX_PIN, SENSOR_RX_PIN, SENSOR_POWER_PIN);
-    ESP_LOGI(TAG, "║   Addr=0x%02X   Baud=9600,8,N,1           ║", SENSOR_ADDR);
-    ESP_LOGI(TAG, "╚══════════════════════════════════════════╝");
+    ESP_LOGI(TAG, "   Addr=0x%02X   Baud=9600,8,N,1           ", SENSOR_ADDR);
 
     /* 1. Activer l'alimentation 5V du capteur (IO42) */
     sensor_power_init();
@@ -346,7 +293,6 @@ void app_main(void)
     int ok = 0, err = 0;
 
     ESP_LOGI(TAG, "Démarrage des lectures — intervalle 2s");
-    ESP_LOGI(TAG, "──────────────────────────────────────────");
 
     while (1) {
         memset(response, 0, sizeof(response));
