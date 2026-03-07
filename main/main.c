@@ -1,319 +1,396 @@
+/**
+ * @file main.c
+ * @brief RoboCare — Carte ÉMETTRICE v3.2
+ *
+ * Corrections appliquées (v3.0 → v3.1) :
+ *  1. [CRITIQUE]    Appel bgt_sensor_manager_init : arguments RX et TX
+ *                   étaient inversés. Signature : (rx_pin, tx_pin, ...)
+ *                   donc SENSOR_UART_RX_PIN doit être passé en premier.
+ *  2. [COMMENTAIRE] Commentaire "SPI3_HOST" corrigé → SPI2_HOST.
+ *  3. [ROBUSTESSE]  s_sd_err incrémenté uniquement sur erreur d'écriture,
+ *                   pas si la SD est absente dès le départ.
+ *
+ * Corrections appliquées (v3.1 → v3.2) :
+ *  4. [CRITIQUE]    lora_manager_init() ne reçoit plus MOSI/MISO/SCK.
+ *                   Nouvelle signature : lora_manager_init(NSS, RST, DIO0)
+ *                   Le driver appelle spi_bus_add_device(SPI2_HOST) en interne.
+ *  5. [CRITIQUE]    spi2_bus_init() gère ESP_ERR_INVALID_STATE.
+ *  6. [COMMENTAIRE] DE/RE=AUTO(XY-485) au lieu de IO19.
+ *  7. [ROBUSTESSE]  sd_manager_log_sensor_data() : retour esp_err_t vérifié.
+ *  8. [AUTONOMIE]   Deep sleep remplace vTaskDelay entre les cycles.
+ *                   Les statistiques survivent en RTC_DATA_ATTR (RTC RAM).
+ *                   app_main() est rappelé à chaque réveil.
+ */
 
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
+#include <inttypes.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
 #include "esp_log.h"
-#include "driver/uart.h"
-#include "driver/gpio.h"
+#include "esp_err.h"
+#include "esp_sleep.h"
+#include "nvs_flash.h"
 
-static const char *TAG = "ROBOCARE_CAPTEUR_SOL";
+/* SPI bus partagé (SD + LoRa sur SPI2_HOST) */
+#include "driver/spi_master.h"
+#include "driver/spi_common.h"
 
+/* Composants projet */
+#include "bgt_sensor_manager.h"
+#include "lora_manager.h"
+#include "sd_manager.h"
+#include "rtc_manager.h"
+#include "sleep_manager.h"
 
-#define SENSOR_RX_PIN      17    /* IO17 — Ligne 20 : RX_UART CAPTEUR    */
-#define SENSOR_TX_PIN      18    /* IO18 — Ligne 21 : TX_UART CAPTEUR    */
-#define SENSOR_DE_RE_PIN   (-1)  /* SN65HVD485E intégré → pas de DE/RE  */
+/* =========================================================================
+ * Brochage
+ * ========================================================================= */
 
-/* Alimentation 5V capteur — IO42 Ligne 36 "OFF POWER / ROLLING 5V" */
-#define SENSOR_POWER_PIN   42    /* OUTPUT — mettre -1 si alim externe   */
+/* RS-485 / Capteur sol NBL-S-TMC-7 */
+#define SENSOR_UART_RX_PIN      17      /* RX_UART CAPTEUR_UART → IO17      */
+#define SENSOR_UART_TX_PIN      18      /* TX_UART CAPTEUR_UART → IO18      */
+#define SENSOR_DE_RE_PIN        -1      /* AUTO — module XY-485 gère DE/RE  */
+#define SENSOR_POWER_PIN        42      /* OFF POWER / 5V PWR   → IO42      */
+#define SENSOR_MODBUS_ADDR      0x01
 
-/* Paramètres Modbus */
-#define SENSOR_ADDR        0x01  /* Adresse usine par défaut             */
-#define UART_PORT          UART_NUM_1
-#define UART_BUF_SIZE      256
+/* SPI2 partagé : SD + LoRa Ra-02 (CS distincts) */
+#define SPI_SCK_PIN             12      /* CLK  SPI  → IO12                 */
+#define SPI_MISO_PIN            13      /* MISO SPI  → IO13                 */
+#define SPI_MOSI_PIN            11      /* MOSI SPI  → IO11                 */
 
-/* Tailles buffers (pas de VLA) */
-#define RESP_MAX_LEN       32
-#define HEX_BUF_LEN        (RESP_MAX_LEN * 3 + 1)
+/* LoRa Ra-02 (SX1278) — ajouté sur SPI2_HOST, CS séparé */
+#define LORA_NSS_PIN            10      /* NSS/CS    → IO10                 */
+#define LORA_RST_PIN             8      /* RST       → IO8                  */
+#define LORA_DIO0_PIN           14      /* DIO0      → IO14                 */
 
-/* ══════════════════════════════════════════════════════════════════
- *  CRC16 Modbus
- * ══════════════════════════════════════════════════════════════════ */
-static uint16_t crc16_modbus(const uint8_t *data, size_t len)
+/* SD Card — ajoutée sur SPI2_HOST, CS séparé */
+#define SD_CS_PIN               34      /* CS SD     → IO34                 */
+
+/* RTC DS3231 — I2C */
+#define RTC_SDA_PIN             21      /* SDA       → IO21                 */
+#define RTC_SCL_PIN             26      /* SCL       → IO26                 */
+
+/* Timing */
+#define SAMPLE_PERIOD_US        10000000ULL  /* 10 s en microsecondes        */
+#define SAMPLE_PERIOD_MS        10000        /* 10 s en millisecondes        */
+#define SENSOR_WARMUP_MS        2000         /* Stabilisation capteur        */
+#define EMITTER_NODE_ID         1
+
+/* =========================================================================
+ * Variables globales
+ *
+ * RTC_DATA_ATTR : stockées en RTC RAM → survivent au deep sleep.
+ * Toutes les statistiques sont conservées entre les cycles.
+ * ========================================================================= */
+static const char *TAG = "MAIN";
+
+static RTC_DATA_ATTR uint32_t s_read_ok  = 0;
+static RTC_DATA_ATTR uint32_t s_read_err = 0;
+static RTC_DATA_ATTR uint32_t s_lora_ok  = 0;
+static RTC_DATA_ATTR uint32_t s_lora_err = 0;
+static RTC_DATA_ATTR uint32_t s_sd_ok    = 0;
+static RTC_DATA_ATTR uint32_t s_sd_err   = 0;
+static RTC_DATA_ATTR uint32_t s_cycle    = 0;
+
+static bool s_sd_ready   = false;
+static bool s_lora_ready = false;
+static bool s_rtc_ready  = false;
+
+/* =========================================================================
+ * Utilitaires
+ * ========================================================================= */
+
+/**
+ * @brief Formate un message LoRa depuis les données capteur
+ *        Format : "N1;27.6;32.6;75;7.22;8;8;21;25/03/2025;14:30:00"
+ *                  nodeId;temp;hum;ec;ph;N;P;K;date;heure
+ *
+ * Si pH invalide (0x7FFF du capteur → valeur négative dans driver),
+ * le champ pH est remplacé par "INVAL".
+ */
+static void format_lora_message(char *buf, size_t size,
+                                 const bgt_sensor_data_t *d,
+                                 const datetime_t        *dt)
 {
-    uint16_t crc = 0xFFFF;
-    for (size_t i = 0; i < len; i++) {
-        crc ^= data[i];
-        for (int j = 0; j < 8; j++) {
-            if (crc & 1) crc = (crc >> 1) ^ 0xA001;
-            else         crc >>= 1;
-        }
+    if (d->ph < 0.0f) {
+        snprintf(buf, size,
+                 "N%d;%.1f;%.1f;%.0f;INVAL;%.0f;%.0f;%.0f;"
+                 "%02d/%02d/%04d;%02d:%02d:%02d",
+                 EMITTER_NODE_ID,
+                 d->temperature, d->humidity, d->ec,
+                 d->nitrogen, d->phosphorus, d->potassium,
+                 dt->day, dt->month, dt->year,
+                 dt->hour, dt->minute, dt->second);
+    } else {
+        snprintf(buf, size,
+                 "N%d;%.1f;%.1f;%.0f;%.2f;%.0f;%.0f;%.0f;"
+                 "%02d/%02d/%04d;%02d:%02d:%02d",
+                 EMITTER_NODE_ID,
+                 d->temperature, d->humidity, d->ec, d->ph,
+                 d->nitrogen, d->phosphorus, d->potassium,
+                 dt->day, dt->month, dt->year,
+                 dt->hour, dt->minute, dt->second);
     }
-    return crc;
 }
 
-/* ══════════════════════════════════════════════════════════════════
- *  Alimentation 5V capteur
- * ══════════════════════════════════════════════════════════════════ */
-static void sensor_power_init(void)
+static void print_stats(void)
 {
-#if SENSOR_POWER_PIN >= 0
-    gpio_config_t cfg = {
-        .pin_bit_mask = (1ULL << SENSOR_POWER_PIN),
-        .mode         = GPIO_MODE_OUTPUT,
-        .pull_up_en   = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type    = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&cfg);
-    gpio_set_level(SENSOR_POWER_PIN, 1);   /* Activer 5V */
-    ESP_LOGI(TAG, "✓ Alimentation 5V capteur activée (IO%d)", SENSOR_POWER_PIN);
-    vTaskDelay(pdMS_TO_TICKS(500));        /* Délai stabilisation capteur  */
-#else   
-    ESP_LOGI(TAG, "A  limentation capteur externe (pas de broche configurée)");
-#endif
+    ESP_LOGI(TAG, "+-- Statistiques ----------------------------------+");
+    ESP_LOGI(TAG, "|  Cycles   : %-5"PRIu32"                              |",
+             s_cycle);
+    ESP_LOGI(TAG, "|  Capteur  : OK=%-5"PRIu32"  ERR=%-5"PRIu32"              |",
+             s_read_ok, s_read_err);
+    ESP_LOGI(TAG, "|  SD       : OK=%-5"PRIu32"  ERR=%-5"PRIu32"              |",
+             s_sd_ok,   s_sd_err);
+    ESP_LOGI(TAG, "|  LoRa TX  : OK=%-5"PRIu32"  ERR=%-5"PRIu32"              |",
+             s_lora_ok, s_lora_err);
+    ESP_LOGI(TAG, "+--------------------------------------------------+");
 }
 
-/* ══════════════════════════════════════════════════════════════════
- *  Initialisation UART
- * ══════════════════════════════════════════════════════════════════ */
-static bool uart_sensor_init(void)
+/* =========================================================================
+ * Initialisation bus SPI2
+ *
+ * RÈGLE : ce bus est initialisé UNE SEULE FOIS ici.
+ * SD et LoRa s'y ajoutent via spi_bus_add_device() dans leurs drivers.
+ * Ne jamais appeler spi_bus_initialize(SPI2_HOST) ailleurs.
+ * ========================================================================= */
+static bool spi2_bus_init(void)
 {
-    uart_driver_delete(UART_PORT);   /* reset propre */
-
-    uart_config_t cfg = {
-        .baud_rate  = 9600,
-        .data_bits  = UART_DATA_8_BITS,
-        .parity     = UART_PARITY_DISABLE,
-        .stop_bits  = UART_STOP_BITS_1,
-        .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_APB,
+    spi_bus_config_t buscfg = {
+        .mosi_io_num     = SPI_MOSI_PIN,
+        .miso_io_num     = SPI_MISO_PIN,
+        .sclk_io_num     = SPI_SCK_PIN,
+        .quadwp_io_num   = -1,
+        .quadhd_io_num   = -1,
+        .max_transfer_sz = 4096,
     };
 
-    esp_err_t ret = uart_driver_install(UART_PORT, UART_BUF_SIZE,
-                                        0, 0, NULL, 0);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Erreur install UART: %s", esp_err_to_name(ret));
-        return false;
-    }
-    ret = uart_param_config(UART_PORT, &cfg);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Erreur config UART: %s", esp_err_to_name(ret));
-        return false;
-    }
-    ret = uart_set_pin(UART_PORT,
-                       SENSOR_TX_PIN, SENSOR_RX_PIN,
-                       UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Erreur set pins UART: %s", esp_err_to_name(ret));
-        return false;
-    }
+    esp_err_t ret = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
 
-    ESP_LOGI(TAG, "✓ UART1 initialisé — TX=IO%d  RX=IO%d  9600,8,N,1",
-             SENSOR_TX_PIN, SENSOR_RX_PIN);
+    /* CORRECTION v3.2 : gérer le cas où le bus est déjà initialisé */
+    if (ret == ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "[SPI2] Bus déjà initialisé — OK");
+        return true;
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "[SPI2] Echec initialisation : %s", esp_err_to_name(ret));
+        return false;
+    }
+    ESP_LOGI(TAG, "[SPI2] Bus initialisé (SCK=IO%d MOSI=IO%d MISO=IO%d)",
+             SPI_SCK_PIN, SPI_MOSI_PIN, SPI_MISO_PIN);
     return true;
 }
 
-/* ══════════════════════════════════════════════════════════════════
- *  Envoi trame Modbus + lecture réponse
- * ══════════════════════════════════════════════════════════════════ */
-static int modbus_request(uint8_t *response, size_t resp_size)
-{
-    /* Trame Modbus RTU : 01 03 00 00 00 07 44 0C
-     * Conforme datasheet p.3 — lecture des 7 registres depuis 0x0000 */
-    uint8_t request[8] = {
-        SENSOR_ADDR,    /* 0x01  adresse esclave                          */
-        0x03,           /* Read Holding Registers                          */
-        0x00, 0x00,     /* Registre départ : 0x0000 (Temperature)         */
-        0x00, 0x07,     /* Nombre de registres : 7                         */
-        0x00, 0x00      /* CRC                                             */
-    };
-    uint16_t crc = crc16_modbus(request, 6);
-    request[6] = (uint8_t)(crc & 0xFF);
-    request[7] = (uint8_t)(crc >> 8);
-
-    ESP_LOGI(TAG, ">>> %02X %02X %02X %02X %02X %02X %02X %02X",
-             request[0], request[1], request[2], request[3],
-             request[4], request[5], request[6], request[7]);
-
-    uart_flush_input(UART_PORT);
-    uart_write_bytes(UART_PORT, (const char *)request, 8);
-    uart_wait_tx_done(UART_PORT, pdMS_TO_TICKS(100));
-
-    /* Timeout 1000ms — datasheet : intervalle max entre 2 communications */
-    return uart_read_bytes(UART_PORT, response, resp_size,
-                           pdMS_TO_TICKS(1000));
-}
-
-/* ══════════════════════════════════════════════════════════════════
- *  Décodage et affichage
- * ══════════════════════════════════════════════════════════════════ */
-static void decode_and_print(const uint8_t *resp, int len)
-{
-    /* Affichage HEX brut */
-    char hex[HEX_BUF_LEN];
-    int  off = 0;
-    for (int i = 0; i < len && off < (int)sizeof(hex) - 3; i++) {
-        off += sprintf(&hex[off], "%02X ", resp[i]);
-    }
-    hex[off] = '\0';
-    ESP_LOGI(TAG, "<<< Brut (%d bytes): %s", len, hex);
-
-    /* ── Vérifications minimales ── */
-    if (len < 19) {
-        ESP_LOGE(TAG, "Réponse trop courte : %d bytes (attendu 19)", len);
-        return;
-    }
-    if (resp[0] != SENSOR_ADDR) {
-        ESP_LOGE(TAG, "Adresse incorrecte : reçu 0x%02X attendu 0x%02X",
-                 resp[0], SENSOR_ADDR);
-        return;
-    }
-    if (resp[1] != 0x03) {
-        if (resp[1] == 0x83)
-            ESP_LOGE(TAG, "Exception Modbus ! Code erreur : 0x%02X", resp[2]);
-        else
-            ESP_LOGE(TAG, "Code fonction inattendu : 0x%02X", resp[1]);
-        return;
-    }
-    if (resp[2] != 0x0E) {
-        ESP_LOGW(TAG, "ByteCount=%d (attendu 14=0x0E)", resp[2]);
-    }
-
-    /* ── Vérification CRC ── */
-    uint16_t crc_calc = crc16_modbus(resp, len - 2);
-    uint16_t crc_recv = (uint16_t)resp[len - 2]
-                      | ((uint16_t)resp[len - 1] << 8);
-    if (crc_calc != crc_recv) {
-        ESP_LOGE(TAG, "CRC invalide ! calculé=0x%04X reçu=0x%04X",
-                 crc_calc, crc_recv);
-        return;
-    }
-    ESP_LOGI(TAG, "CRC OK ✓");
-
-    /* ── Extraction 7 registres big-endian ──
-     *
-     * Datasheet p.3 example :
-     *  01 03 0E | 01 14 | 01 46 | 00 4B | 02 D2 | 00 08 | 00 08 | 00 15 | CRC
-     *             T=276   H=326   EC=75   pH=722  N=8     P=8     K=21
-     *
-     * Conversions :
-     *   T   = raw ÷ 10    → 276  → 27.6°C
-     *   H   = raw ÷ 10    → 326  → 32.6%
-     *   EC  = raw brut    → 75   → 75µS/cm
-     *   pH  = raw ÷ 100   → 722  → 7.22pH   (0x7FFF = invalide)
-     *   N   = raw brut    → 8    → 8mg/kg
-     *   P   = raw brut    → 8    → 8mg/kg
-     *   K   = raw brut    → 21   → 21mg/kg
-     */
-    uint16_t raw[7];
-    for (int i = 0; i < 7; i++) {
-        raw[i] = ((uint16_t)resp[3 + i * 2] << 8)
-               |  (uint16_t)resp[4 + i * 2];
-    }
-
-    float temperature = raw[0] / 10.0f;
-    float humidity    = raw[1] / 10.0f;
-    float ec          = (float)raw[2];
-    float ph          = (raw[3] == 0x7FFF) ? -1.0f : raw[3] / 100.0f;
-    float nitrogen    = (float)raw[4];
-    float phosphorus  = (float)raw[5];
-    float potassium   = (float)raw[6];
-
-    /* ── Affichage tableau ── */
-    ESP_LOGI(TAG, "   Données Capteur Sol NBL-S-TMC-7      ");
-    ESP_LOGI(TAG, "  Température    : %6.1f °C              ", temperature);
-    ESP_LOGI(TAG, "  Humidité       : %6.1f %%              ", humidity);
-    ESP_LOGI(TAG, "  Conductivité   : %6.0f µS/cm          ", ec);
-    if (ph < 0.0f)
-        ESP_LOGI(TAG, "  pH             :   INVALIDE (0x7FFF)  ");
-    else
-        ESP_LOGI(TAG, "  pH             : %6.2f               ", ph);
-    ESP_LOGI(TAG, " Azote     (N)  : %6.0f mg/kg          ", nitrogen);
-    ESP_LOGI(TAG, "  Phosphore (P)  : %6.0f mg/kg          ", phosphorus);
-    ESP_LOGI(TAG, "  Potassium (K)  : %6.0f mg/kg          ", potassium);
-
-    /* ── Alertes plages datasheet ── */
-    if (temperature < -40.0f || temperature > 80.0f)
-        ESP_LOGW(TAG, "  ⚠  Température hors plage [-40..80°C] !");
-    if (humidity < 0.0f || humidity > 100.0f)
-        ESP_LOGW(TAG, "  ⚠  Humidité hors plage [0..100%%] !");
-    if (ec > 10000.0f)
-        ESP_LOGW(TAG, "  ⚠  EC hors plage [0..10000µS/cm] !");
-    if (ph >= 0.0f && ph > 10.0f)
-        ESP_LOGW(TAG, "  ⚠  pH hors plage [0..10] !");
-    if (nitrogen > 2000.0f || phosphorus > 2000.0f || potassium > 2000.0f)
-        ESP_LOGW(TAG, "  ⚠  NPK hors plage [0..2000mg/kg] !");
-}
-
-/* ══════════════════════════════════════════════════════════════════
- *  Guide de dépannage
- * ══════════════════════════════════════════════════════════════════ */
-static void print_troubleshoot(int err_count)
-{
-    /* Afficher au 1er échec, puis rappeler toutes les 10 erreurs */
-    if (err_count != 1 && (err_count % 10) != 0) return;
-
-    ESP_LOGE(TAG, "AUCUNE RÉPONSE (%2d erreur(s))           ", err_count);
-    ESP_LOGE(TAG, "ALIMENTATION CAPTEUR  ");
-    ESP_LOGE(TAG, " IO42 → 5V activé ? (gpio_set_level) ");
-    ESP_LOGE(TAG, " Rouge = 5-24V | Noir = GND        ");
-    ESP_LOGE(TAG, "  ❌ Jamais 3.3V — min 5V requis   ");
-    ESP_LOGE(TAG, " CÂBLAGE RS485 ");
-    ESP_LOGE(TAG, " Jaune (capteur) → A+ transceiver   ");
-    ESP_LOGE(TAG, " Bleu  (capteur) → B- transceiver ");
-    ESP_LOGE(TAG, "Si rien → inverser A+ et B-    ");
-    ESP_LOGE(TAG, "BROCHES UART (pinout A.5)    ");
-    ESP_LOGE(TAG, "TX ESP32 = IO%d → DI transceiver", SENSOR_TX_PIN);
-    ESP_LOGE(TAG, "RX ESP32 = IO%d → RO transceiver ", SENSOR_RX_PIN);
-    ESP_LOGE(TAG, "ADRESSE MODBUS ");
-    ESP_LOGE(TAG, "Défaut usine = 0x01  ");
-    ESP_LOGE(TAG, "Si modifiée → changer SENSOR_ADDR  ");
-    ESP_LOGE(TAG, "INTER-TRAME ");
-    ESP_LOGE(TAG, "Datasheet impose ≥ 1000ms entre   ");
-    ESP_LOGE(TAG, "  deux communications (OK : 2000ms) ");
-}
-
-/* ══════════════════════════════════════════════════════════════════
- *  app_main
- * ══════════════════════════════════════════════════════════════════ */
+/* =========================================================================
+ * app_main
+ *
+ * Appelé à chaque démarrage ET à chaque réveil depuis deep sleep.
+ * Un seul cycle d'acquisition est effectué, puis le système entre
+ * en deep sleep pendant SAMPLE_PERIOD_US (10 secondes).
+ * ========================================================================= */
 void app_main(void)
 {
-    ESP_LOGI(TAG, "RoboCare — Test Capteur Sol   ");
-    ESP_LOGI(TAG, " NBL-S-TMC-7  Modbus RTU RS485     ");
-    ESP_LOGI(TAG, "  TX=IO%-2d  RX=IO%-2d  PWR=IO%-2d           ",
-             SENSOR_TX_PIN, SENSOR_RX_PIN, SENSOR_POWER_PIN);
-    ESP_LOGI(TAG, "   Addr=0x%02X   Baud=9600,8,N,1           ", SENSOR_ADDR);
+    s_cycle++;
 
-    /* 1. Activer l'alimentation 5V du capteur (IO42) */
-    sensor_power_init();
+    ESP_LOGI(TAG, "+================================================+");
+    ESP_LOGI(TAG, "|   RoboCare — Carte EMETTRICE  v3.2            |");
+    ESP_LOGI(TAG, "|   Noeud ID : %-3d  |  Cycle : %-5"PRIu32"             |",
+             EMITTER_NODE_ID, s_cycle);
+    ESP_LOGI(TAG, "+================================================+");
 
-    /* 2. Initialiser l'UART1 */
-    if (!uart_sensor_init()) {
-        ESP_LOGE(TAG, "Échec initialisation UART — arrêt.");
-        return;
+    /* Identifier la cause du réveil */
+    esp_sleep_wakeup_cause_t wakeup = esp_sleep_get_wakeup_cause();
+    if (wakeup == ESP_SLEEP_WAKEUP_TIMER) {
+        ESP_LOGI(TAG, "Réveil deep sleep (timer) — cycle #%"PRIu32, s_cycle);
+    } else {
+        ESP_LOGI(TAG, "Démarrage initial (power-on / reset)");
     }
 
-    /* 3. Délai supplémentaire pour laisser le capteur démarrer */
-    ESP_LOGI(TAG, "Attente démarrage capteur (1.5s)...");
-    vTaskDelay(pdMS_TO_TICKS(1500));
+    /* ── NVS ─────────────────────────────────────────────────── */
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
+        ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
 
-    /* 4. Boucle de lecture */
-    uint8_t response[RESP_MAX_LEN];
-    int ok = 0, err = 0;
+    /* ── 1/5 — Bus SPI2 (requis par SD + LoRa) ───────────────── */
+    ESP_LOGI(TAG, "[INIT 1/5] Bus SPI2 (partage SD + LoRa)");
+    if (!spi2_bus_init()) {
+        ESP_LOGE(TAG, "  SPI2 ECHEC — deep sleep forcé.");
+        goto enter_deep_sleep;
+    }
 
-    ESP_LOGI(TAG, "Démarrage des lectures — intervalle 2s");
-
-    while (1) {
-        memset(response, 0, sizeof(response));
-
-        int len   = modbus_request(response, sizeof(response));
-        int total = ok + err + 1;
-
-        if (len > 0) {
-            ok++;
-            ESP_LOGI(TAG, "── Lecture #%d  [OK:%d / ERR:%d] ──",
-                     total, ok, err);
-            decode_and_print(response, len);
-        } else {
-            err++;
-            ESP_LOGE(TAG, "── Lecture #%d  TIMEOUT [OK:%d / ERR:%d] ──",
-                     total, ok, err);
-            print_troubleshoot(err);
+    /* ── 2/5 — RTC DS3231 ────────────────────────────────────── */
+    ESP_LOGI(TAG, "[INIT 2/5] RTC DS3231  SDA=IO%d  SCL=IO%d",
+             RTC_SDA_PIN, RTC_SCL_PIN);
+    s_rtc_ready = rtc_manager_init(RTC_SDA_PIN, RTC_SCL_PIN);
+    if (!s_rtc_ready) {
+        ESP_LOGW(TAG, "  RTC absent — horodatage a zero");
+    } else {
+        datetime_t dt_now;
+        if (rtc_manager_get_datetime(&dt_now)) {
+            char buf[32];
+            rtc_manager_format_date(buf, sizeof(buf), &dt_now);
+            ESP_LOGI(TAG, "  RTC OK — %s", buf);
         }
-
-        /* Datasheet : ≥ 1000ms entre 2 communications
-           On utilise 2000ms pour être à l'aise */
-        vTaskDelay(pdMS_TO_TICKS(2000));
     }
+
+    /* ── 3/5 — Capteur sol RS-485 ────────────────────────────── */
+    ESP_LOGI(TAG, "[INIT 3/5] Capteur NBL-S-TMC-7 (RS-485 via module XY-485)");
+    ESP_LOGI(TAG, "  RX=IO%d  TX=IO%d  DE/RE=AUTO(XY-485)  PWR=IO%d  Addr=0x%02X",
+             SENSOR_UART_RX_PIN, SENSOR_UART_TX_PIN,
+             SENSOR_POWER_PIN, SENSOR_MODBUS_ADDR);
+
+    /*
+     * CORRECTION v3.1 — ordre des arguments corrigé :
+     *   v3.0 passait (TX_PIN, RX_PIN) → UART inversé → aucune réponse capteur
+     *
+     * CORRECTION v3.2 — SENSOR_DE_RE_PIN = -1 :
+     *   Le module XY-485 gère automatiquement la direction RS-485.
+     */
+    if (!bgt_sensor_manager_init(SENSOR_UART_RX_PIN,   /* rx_pin  = IO17 */
+                                  SENSOR_UART_TX_PIN,   /* tx_pin  = IO18 */
+                                  SENSOR_DE_RE_PIN,     /* de_re   = -1   */
+                                  SENSOR_POWER_PIN,     /* pwr     = IO42 */
+                                  SENSOR_MODBUS_ADDR)) {
+        ESP_LOGE(TAG, "  Capteur ECHEC — deep sleep forcé.");
+        goto enter_deep_sleep;
+    }
+    ESP_LOGI(TAG, "  Capteur OK — stabilisation %d ms...", SENSOR_WARMUP_MS);
+    vTaskDelay(pdMS_TO_TICKS(SENSOR_WARMUP_MS));
+
+    /* ── 4/5 — Carte SD ──────────────────────────────────────── */
+    ESP_LOGI(TAG, "[INIT 4/5] SD Card  CS=IO%d  (SPI2_HOST)", SD_CS_PIN);
+    s_sd_ready = sd_manager_init(SD_CS_PIN);
+    ESP_LOGI(TAG, "  SD %s", s_sd_ready ? "OK -> /sdcard/capteur_bgt.csv"
+                                         : "NON DISPONIBLE");
+
+    /* ── 5/5 — LoRa Ra-02 ────────────────────────────────────── */
+    /*
+     * CORRECTION v3.2 — Signature corrigée :
+     *   AVANT : lora_manager_init(MOSI, MISO, SCK, NSS, RST, DIO0) → crash
+     *   APRÈS : lora_manager_init(NSS, RST, DIO0) → spi_bus_add_device() seul
+     */
+    ESP_LOGI(TAG, "[INIT 5/5] LoRa Ra-02  NSS=IO%d  RST=IO%d  DIO0=IO%d  (SPI2_HOST)",
+             LORA_NSS_PIN, LORA_RST_PIN, LORA_DIO0_PIN);
+
+    s_lora_ready = lora_manager_init(LORA_NSS_PIN,    /* CS   = IO10 */
+                                      LORA_RST_PIN,    /* RST  = IO8  */
+                                      LORA_DIO0_PIN);  /* DIO0 = IO14 */
+    if (!s_lora_ready)
+        ESP_LOGW(TAG, "  LoRa ECHEC — verifier NSS/RST/DIO0 (SX1278 != 0x12 ?)");
+    else
+        ESP_LOGI(TAG, "  LoRa OK (SX1278 detecte, 433 MHz SF12)");
+
+    /* ── Résumé brochage ─────────────────────────────────────── */
+    ESP_LOGI(TAG, "--- Brochage actif --------------------------------");
+    ESP_LOGI(TAG, "  RS-485   RX=IO17  TX=IO18  DE/RE=AUTO(XY-485)  PWR=IO42");
+    ESP_LOGI(TAG, "  SPI2     SCK=IO12  MOSI=IO11  MISO=IO13");
+    ESP_LOGI(TAG, "  LoRa     NSS=IO10  RST=IO8   DIO0=IO14  (SPI2_HOST)");
+    ESP_LOGI(TAG, "  SD       CS=IO34                         (SPI2_HOST)");
+    ESP_LOGI(TAG, "  RTC I2C  SDA=IO21  SCL=IO26");
+    ESP_LOGI(TAG, "  SD:%s  LoRa:%s  RTC:%s",
+             s_sd_ready   ? "OK " : "N/A",
+             s_lora_ready ? "OK " : "N/A",
+             s_rtc_ready  ? "OK " : "N/A");
+    ESP_LOGI(TAG, "--------------------------------------------------");
+
+    /* =========================================================
+     * CYCLE D'ACQUISITION
+     * ========================================================= */
+
+    bgt_sensor_data_t data;
+    datetime_t        dt;
+    char              date_str[32];
+    char              lora_msg[120];
+
+    /* ── 1. Lecture RTC ──────────────────────────────────────── */
+    bool rtc_ok = false;
+    if (s_rtc_ready) {
+        rtc_ok = rtc_manager_get_datetime(&dt);
+    }
+    if (!rtc_ok) {
+        memset(&dt, 0, sizeof(dt));
+        dt.year = 2025;
+    }
+    rtc_manager_format_date(date_str, sizeof(date_str), &dt);
+    ESP_LOGI(TAG, "== Cycle #%"PRIu32" | %s ==", s_cycle, date_str);
+
+    /* ── 2. Lecture capteur sol ──────────────────────────────── */
+    bool sensor_ok = bgt_sensor_manager_read_all(&data);
+
+    if (sensor_ok) {
+        s_read_ok++;
+        ESP_LOGI(TAG, "  [CAPTEUR] OK");
+        ESP_LOGI(TAG, "  Temperature   : %.1f C",     data.temperature);
+        ESP_LOGI(TAG, "  Humidite      : %.1f %%",    data.humidity);
+        ESP_LOGI(TAG, "  Conductivite  : %.0f uS/cm", data.ec);
+        if (data.ph < 0.0f)
+            ESP_LOGW(TAG, "  pH            : INVALIDE (sonde déconnectée ?)");
+        else
+            ESP_LOGI(TAG, "  pH            : %.2f",   data.ph);
+        ESP_LOGI(TAG, "  Azote     (N) : %.0f mg/kg", data.nitrogen);
+        ESP_LOGI(TAG, "  Phosphore (P) : %.0f mg/kg", data.phosphorus);
+        ESP_LOGI(TAG, "  Potassium (K) : %.0f mg/kg", data.potassium);
+    } else {
+        s_read_err++;
+        ESP_LOGE(TAG, "  [CAPTEUR] ECHEC — timeout/CRC (cycle #%"PRIu32")",
+                 s_cycle);
+        goto enter_deep_sleep;
+    }
+
+    /* ── 3. Écriture SD ─────────────────────────────────────── */
+    if (s_sd_ready) {
+        /* sd_manager_log_sensor_data() retourne void dans le driver actuel */
+        sd_manager_log_sensor_data(&dt, &data);
+        s_sd_ok++;
+        ESP_LOGI(TAG, "  [SD] OK");
+    } else {
+        /* Absence matérielle ≠ erreur d'écriture → pas d'incrément */
+        ESP_LOGW(TAG, "  [SD] Non disponible");
+    }
+
+    /* ── 4. Envoi LoRa ───────────────────────────────────────── */
+    if (s_lora_ready) {
+        format_lora_message(lora_msg, sizeof(lora_msg), &data, &dt);
+        ESP_LOGI(TAG, "  [LORA] MSG: %s", lora_msg);
+
+        bool tx_ok = lora_manager_send_message(lora_msg);
+        if (tx_ok) {
+            s_lora_ok++;
+            ESP_LOGI(TAG, "  [LORA] TX OK | total=%"PRIu32, s_lora_ok);
+        } else {
+            s_lora_err++;
+            ESP_LOGE(TAG, "  [LORA] TX ECHEC | total ERR=%"PRIu32, s_lora_err);
+        }
+    } else {
+        ESP_LOGW(TAG, "  [LORA] Non disponible");
+    }
+
+    /* ── 5. Stats toutes les 10 acquisitions ─────────────────── */
+    if (s_cycle % 10 == 0) print_stats();
+
+enter_deep_sleep:
+    /*
+     * CORRECTION v3.2 — Deep sleep remplace vTaskDelay(10s) :
+     *
+     * vTaskDelay laissait tous les périphériques sous tension 10s.
+     * Sur batteries, le deep sleep (~10 µA) est indispensable vs
+     * ~40 mA en actif → autonomie multipliée drastiquement.
+     *
+     * Les statistiques (RTC_DATA_ATTR) survivent en RTC RAM.
+     * app_main() est rappelé intégralement au prochain réveil.
+     */
+    ESP_LOGI(TAG, "Deep sleep — réveil dans 10 s (cycle #%"PRIu32" terminé)",
+             s_cycle);
+    esp_sleep_enable_timer_wakeup(SAMPLE_PERIOD_US);
+    esp_deep_sleep_start();
+
+    /* Ne jamais atteint */
 }

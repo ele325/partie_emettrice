@@ -1,58 +1,116 @@
 {
     "configurations": [
         {
-            "name": "ESP-IDF",
-            "compilerPath": "C:/Espressif/tools/xtensa-esp-elf/esp-13.2.0_20240530/xtensa-esp-elf/bin/xtensa-esp32s2-elf-gcc.exe",
-            "compilerArgs": [],
-            "cStandard": "c11",
-            "cppStandard": "c++17",
+            "name": "ESP-IDF v5.3.1 — ESP32-S3",
+
+            // ================================================================
+            // Chemin compilateur EXACT vérifié sur votre machine :
+            // C:\Espressif\tools\xtensa-esp-elf\esp-14.2.0_20251107\
+            //     xtensa-esp-elf\bin\xtensa-esp32s3-elf-gcc.exe
+            // ATTENTION : le dossier intermédiaire est "xtensa-esp-elf"
+            //             et NON "xtensa-esp32s3-elf" (erreur courante)
+            // ================================================================
+            "compilerPath": "C:/Espressif/tools/xtensa-esp-elf/esp-14.2.0_20251107/xtensa-esp-elf/bin/xtensa-esp32s3-elf-gcc.exe",
+            "compilerArgs": [ "-mlongcalls" ],
+            "cStandard": "gnu17",
+            "cppStandard": "gnu++17",
+            "intelliSenseMode": "gcc-x64",
+
+            // Généré par "idf.py build" — solution finale qui résout tout
             "compileCommands": "${workspaceFolder}/build/compile_commands.json",
+
+            // ================================================================
+            // Tous les chemins vérifiés sur votre machine
+            // ================================================================
             "includePath": [
                 "${workspaceFolder}/**",
-                "${workspaceFolder}/main",
-                "${workspaceFolder}/components/**",
-                "${workspaceFolder}/build/config",
 
-                "C:/Espressif/tools/xtensa-esp-elf/esp-13.2.0_20240530/xtensa-esp-elf/xtensa-esp-elf/include",
-                "C:/Espressif/tools/xtensa-esp-elf/esp-13.2.0_20240530/xtensa-esp-elf/lib/gcc/xtensa-esp-elf/13.2.0/include",
-                "C:/Espressif/tools/xtensa-esp-elf/esp-13.2.0_20240530/xtensa-esp-elf/lib/gcc/xtensa-esp-elf/13.2.0/include-fixed",
-
-                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/newlib/platform_include",
-
+                // FreeRTOS
                 "C:/Espressif/frameworks/esp-idf-v5.3.1/components/freertos/FreeRTOS-Kernel/include",
                 "C:/Espressif/frameworks/esp-idf-v5.3.1/components/freertos/FreeRTOS-Kernel/portable/xtensa/include",
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/freertos/FreeRTOS-Kernel-SMP/include",
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/freertos/FreeRTOS-Kernel-SMP/portable/xtensa/include",
                 "C:/Espressif/frameworks/esp-idf-v5.3.1/components/freertos/esp_additions/include",
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/freertos/config/include",
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/freertos/config/xtensa/include",
 
+                // ESP système
                 "C:/Espressif/frameworks/esp-idf-v5.3.1/components/esp_common/include",
-                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/esp_hw_support/include",
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/esp_system/include",
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/esp_system/port/include",
                 "C:/Espressif/frameworks/esp-idf-v5.3.1/components/esp_rom/include",
-           
-                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/driver/deprecated",
-                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/hal/include",
-                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/hal/esp32s2/include",
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/esp_hw_support/include",
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/esp_hw_support/port/include",
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/esp_hw_support/port/esp32s3/include",
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/esp_timer/include",
+
+                // NVS — vérifié présent
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/nvs_flash/include",
+
+                // Log
                 "C:/Espressif/frameworks/esp-idf-v5.3.1/components/log/include",
+
+                // Drivers v5.x
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/esp_driver_spi/include",
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/esp_driver_uart/include",
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/esp_driver_gpio/include",
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/esp_driver_i2c/include",
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/esp_driver_sdspi/include",
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/esp_driver_sdmmc/include",
+
+                // Driver legacy i2c (driver/i2c.h utilisé par rtc_manager)
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/driver/i2c/include",
+
+                // HAL / SOC
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/hal/include",
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/hal/esp32s3/include",
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/hal/platform_port/include",
                 "C:/Espressif/frameworks/esp-idf-v5.3.1/components/soc/include",
-                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/soc/esp32s2/include",
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/soc/esp32s3/include",
+
+                // Xtensa
                 "C:/Espressif/frameworks/esp-idf-v5.3.1/components/xtensa/include",
-                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/xtensa/esp32s2/include"
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/xtensa/esp32s3/include",
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/xtensa/deprecated_include",
+
+                // Mémoire
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/heap/include",
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/esp_ringbuf/include",
+
+                // Système de fichiers / SD
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/vfs/include",
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/sdmmc/include",
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/fatfs/vfs",
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/fatfs/src",
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/spi_flash/include",
+
+                // Newlib
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/newlib/platform_include",
+
+                // Sleep
+                "C:/Espressif/frameworks/esp-idf-v5.3.1/components/esp_pm/include",
+
+                // sdkconfig.h — généré après idf.py build
+                "${workspaceFolder}/build/config"
             ],
+
             "defines": [
                 "ESP_PLATFORM",
                 "IDF_VER=\"v5.3.1\"",
-                "CONFIG_IDF_TARGET_ESP32S2=1",
-                "CONFIG_IDF_TARGET=\"esp32s2\"",
+                "CONFIG_IDF_TARGET_ESP32S3=1",
+                "CONFIG_IDF_TARGET=\"esp32s3\"",
                 "__xtensa__",
-                "__XTENSA__"
+                "SOC_CPU_CORES_NUM=2",
+                "configNUM_CORES=2"
             ],
+
             "browse": {
                 "path": [
                     "${workspaceFolder}",
-                    "C:/Espressif/frameworks/esp-idf-v5.3.1/components",
-                    "C:/Espressif/tools/xtensa-esp-elf/esp-13.2.0_20240530/xtensa-esp-elf/xtensa-esp-elf/include"
+                    "C:/Espressif/frameworks/esp-idf-v5.3.1/components"
                 ],
                 "limitSymbolsToIncludedHeaders": false
-            },
-            "intelliSenseMode": "gcc-x64"
+            }
         }
     ],
     "version": 4

@@ -1,8 +1,50 @@
 {
-    "idf.currentSetup": "C:/Espressif/frameworks/esp-idf-v5.3.1/",
-    "idf.customExtraVars": {
-        "IDF_TARGET": "esp32s2"
+    // =========================================================================
+    // ESP-IDF v5.3.1 — settings.json
+    // Placer dans : D:\PFE APP\esp_projects\partie_emettrice\.vscode\settings.json
+    // =========================================================================
+
+    // ── Chemins ESP-IDF ───────────────────────────────────────────────────────
+    // Installation via l'installateur officiel Windows (chemin par défaut)
+    // Si vous avez installé ailleurs, modifier ces deux lignes
+    "idf.espIdfPath": "C:/Espressif/frameworks/esp-idf-v5.3.1",
+    "idf.toolsPath": "C:/Espressif",
+
+    // Cible matérielle
+    "idf.adapterTargetName": "esp32s3",
+
+    // Port COM — adapter selon votre PC (vérifier dans Gestionnaire de périphériques)
+    "idf.port": "COM3",
+
+    // Vitesse de flash
+    "idf.flashBaudRate": "921600",
+
+    // ── IntelliSense ──────────────────────────────────────────────────────────
+    // compile_commands.json est LA vraie solution : généré par idf.py build
+    // Il contient les includes EXACTS utilisés par le vrai compilateur
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
+
+    // Compilateur Xtensa pour ESP32-S3 (v5.3.1 utilise esp-13.2.0_20240530)
+    "C_Cpp.default.compilerPath": "C:/Espressif/tools/xtensa-esp-elf/esp-13.2.0_20240530/xtensa-esp-elf/bin/xtensa-esp32s3-elf-gcc.exe",
+
+    // Désactiver les faux positifs IntelliSense pendant le premier build
+    "C_Cpp.errorSquiggles": "enabled",
+    "C_Cpp.intelliSenseEngine": "default",
+
+    // ── Terminal intégré VSCode ───────────────────────────────────────────────
+    // Utilise le PowerShell ESP-IDF pour que idf.py fonctionne dans le terminal VSCode
+    "terminal.integrated.defaultProfile.windows": "PowerShell",
+    "terminal.integrated.env.windows": {
+        "IDF_PATH": "C:/Espressif/frameworks/esp-idf-v5.3.1",
+        "IDF_TOOLS_PATH": "C:/Espressif"
     },
-    "idf.portWin": "COM9",
-    "idf.flashType": "UART"
+
+    // ── Divers ────────────────────────────────────────────────────────────────
+    "idf.enableStatusBar": true,
+    "idf.showOnboardingOnInit": false,
+    "files.associations": {
+        "*.c": "c",
+        "*.h": "c"
+    },
+    "idf.currentSetup": "C:\\esp\\v5.5.3\\esp-idf"
 }

@@ -5,6 +5,7 @@ idf_component_register(
         "include"
     REQUIRES
         driver
+        esp_common
         freertos
         log
 )
