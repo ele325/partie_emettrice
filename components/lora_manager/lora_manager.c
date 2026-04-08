@@ -86,18 +86,17 @@ static spi_device_handle_t s_spi_lora = NULL;
 
 static uint8_t lora_read_byte(uint8_t addr)
 {
-    uint8_t tx[2] = { addr & 0x7F, 0x00 };
-    uint8_t rx[2] = { 0x00, 0x00 };
-
+    uint8_t tx = addr & 0x7F;
+    uint8_t rx = 0;
     spi_transaction_t t = {
-        .length    = 16,        /* 16 bits envoyés                          */
-        .rxlength  = 16,        /* 16 bits reçus                            */
-        .tx_buffer = tx,
-        .rx_buffer = rx,
+        .length    = 8,   // TX : 8 bits
+        .rxlength  = 8,   // RX : 8 bits
+        .tx_buffer = &tx,
+        .rx_buffer = &rx,
+        .flags     = 0,
     };
-
     spi_device_transmit(s_spi_lora, &t);
-    return rx[1];               /* octet utile = 2ème octet reçu            */
+    return rx;
 }
 
 static void lora_write_byte(uint8_t addr, uint8_t value)
@@ -169,7 +168,7 @@ bool lora_manager_init(int cs_pin, int rst_pin, int dio0_pin)
         .clock_speed_hz = 1 * 1000 * 1000, /* 1 MHz — fiable sur Ra-02     */
         .spics_io_num   = cs_pin,           /* NSS = IO10                   */
         .queue_size     = 7,
-        .flags          = 0,                /* full-duplex                  */
+        .flags = SPI_DEVICE_HALFDUPLEX,               /* full-duplex                  */
         .pre_cb         = NULL,
         .post_cb        = NULL,
     };

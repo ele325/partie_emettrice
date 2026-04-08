@@ -21,17 +21,17 @@
 #define PIN_SPI_MOSI            11  // OK : MOSI sur schéma
 
 /* ---------- GPIO - LoRa SX1278 ---------- */
-#define PIN_LORA_CS             14  // OK : NSS sur schéma
-#define PIN_LORA_RST            10  // OK : Reset selon CSV
-#define PIN_LORA_IRQ            5   // OK : Interruption
+#define PIN_LORA_CS    10  // corrigé
+#define PIN_LORA_RST    9  // corrigé
+#define PIN_LORA_IRQ   14  // corrigé
 
 /* ---------- GPIO - Carte SD ---------- */
 #define PIN_SD_CS               34  // OK : CS Carte_SD sur schéma
 
 /* ---------- GPIO - Capteur BGT-SMPS (MODBUS RS485) ---------- */
-#define PIN_MODBUS_RX           17  // IO17 (RX Connecteur)
-#define PIN_MODBUS_TX           18  // IO18 (TX Connecteur)
-#define PIN_MODBUS_EN           19  // IO19 (Contrôle DE/RE pour RS485)
+#define PIN_MODBUS_RX    17   /* IO17 ← RO du MAX485  */
+#define PIN_MODBUS_TX    18   /* IO18 → DI du MAX485  */
+#define PIN_MODBUS_EN    19   /* IO19 → TX_EN (RE+DE) */
 #define MODBUS_BAUD_RATE        9600
 #define MODBUS_UART_PORT        UART_NUM_1
 
