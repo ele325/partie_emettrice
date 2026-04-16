@@ -4,7 +4,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "driver/spi_common.h"
-#include "esp_vfs_fat.h"      // ← pour unmount SD
+#include "esp_vfs_fat.h"
 
 #include "app_config.h"
 #include "rtc_manager.h"
@@ -17,19 +17,65 @@ static const char *TAG = "ROBOCARE_SYSTEM";
 
 esp_err_t spi2_bus_init(void) {
     spi_bus_config_t buscfg = {
-        .miso_io_num   = PIN_SPI_MISO,
-        .mosi_io_num   = PIN_SPI_MOSI,
-        .sclk_io_num   = PIN_SPI_SCK,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
+        .miso_io_num     = PIN_SPI_MISO,
+        .mosi_io_num     = PIN_SPI_MOSI,
+        .sclk_io_num     = PIN_SPI_SCK,
+        .quadwp_io_num   = -1,
+        .quadhd_io_num   = -1,
         .max_transfer_sz = 4096
     };
     return spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// NOUVEAU : attendre le slot LoRa de ce nœud
+//
+// Principe :
+//   - Lire l'heure exacte sur le DS3231
+//   - Calculer combien de secondes restent avant LORA_SLOT_SECONDS
+//   - Attendre (vTaskDelay) — CPU actif mais LoRa silencieux
+//   - Retourner quand c'est le tour de ce nœud d'émettre
+//
+// Exemple avec NODE_ID=2 (slot = :10) :
+//   réveil à :03 → wait = 7s → émet à :10
+//   réveil à :12 → wait = 58s → attend la prochaine minute, émet à :10
+// ─────────────────────────────────────────────────────────────────────────────
+static void lora_wait_for_slot(void)
+{
+    datetime_t now;
+    if (!rtc_manager_get_datetime(&now)) {
+        // RTC illisible → on émet sans attendre plutôt que de bloquer
+        ESP_LOGW(TAG, "[SLOT] RTC illisible — émission immédiate");
+        return;
+    }
+
+    int target = LORA_SLOT_SECONDS;          // seconde cible dans la minute
+    int current = (int)now.second;
+    int wait_sec = target - current;
+
+    if (wait_sec < 0) {
+        // On a dépassé la seconde cible → attendre la prochaine minute
+        wait_sec += 60;
+    }
+
+    if (wait_sec == 0) {
+        ESP_LOGI(TAG, "[SLOT] Node %d — slot immédiat (:%.2d)", NODE_ID, target);
+        return;
+    }
+
+    ESP_LOGI(TAG, "[SLOT] Node %d — attente %ds (slot :%.2d, maintenant :%.2d)",
+             NODE_ID, wait_sec, target, current);
+
+    vTaskDelay(pdMS_TO_TICKS(wait_sec * 1000));
+
+    ESP_LOGI(TAG, "[SLOT] Node %d — émission autorisée", NODE_ID);
+}
+
 void app_main(void)
 {
-    // --- PHASE 1 : INITIALISATION ---
+    // =========================================================================
+    // PHASE 1 : INITIALISATION
+    // =========================================================================
     ESP_LOGI(TAG, "==============================================");
     ESP_LOGI(TAG, "  DÉMARRAGE DU NŒUD ÉMETTEUR (ID: %d)", NODE_ID);
     ESP_LOGI(TAG, "==============================================");
@@ -63,7 +109,9 @@ void app_main(void)
         ESP_LOGW(TAG, "[MODBUS] Capteur non détecté au démarrage");
     }
 
-    // --- PHASE 2 : MESURE ET TRANSMISSION ---
+    // =========================================================================
+    // PHASE 2 : MESURE
+    // =========================================================================
     ESP_LOGI(TAG, "----------------------------------------------");
     ESP_LOGI(TAG, "DÉBUT DU CYCLE DE MESURE");
 
@@ -93,23 +141,40 @@ void app_main(void)
                  data.humidity, data.temperature, data.ph,
                  data.ec, data.nitrogen, data.phosphorus, data.potassium);
 
+        // ─────────────────────────────────────────────────────────────────
+        // NOUVEAU : synchronisation RTC — attendre le slot de ce nœud
+        // La mesure est déjà faite et loggée sur SD.
+        // On attend ici sans rien perdre.
+        // ─────────────────────────────────────────────────────────────────
+        ESP_LOGI(TAG, "----------------------------------------------");
+        ESP_LOGI(TAG, "[SYNC] Synchronisation slot LoRa (NODE_ID=%d, slot=:%02d)",
+                 NODE_ID, LORA_SLOT_SECONDS);
+        lora_wait_for_slot();
+
+        // ─────────────────────────────────────────────────────────────────
+        // Émission LoRa — canal libre, c'est notre tour
+        // ─────────────────────────────────────────────────────────────────
         ESP_LOGI(TAG, "[LORA] Envoi : %s", lora_msg);
         if (lora_manager_send_message(lora_msg)) {
             ESP_LOGI(TAG, "[LORA] Transmission confirmée (TxDone)");
         } else {
             ESP_LOGW(TAG, "[LORA] Échec transmission (Timeout)");
         }
+
     } else {
         ESP_LOGE(TAG, "[SENSOR] Échec lecture — vérifier RS485 et alim 5V");
     }
 
-    // --- PHASE 3 : SOMMEIL ---
+    // =========================================================================
+    // PHASE 3 : SOMMEIL
+    // MODIFIÉ : SLEEP_DURATION_US → SLEEP_BASE_US (sans offset)
+    // L'offset est géré par lora_wait_for_slot(), pas par le timer
+    // =========================================================================
     ESP_LOGI(TAG, "----------------------------------------------");
     lora_manager_deinit();
-    // ✅ CORRECTION 3 : démonter SD proprement avant sleep
     esp_vfs_fat_sdcard_unmount("/sdcard", NULL);
 
-    ESP_LOGI(TAG, "[POWER] Deep Sleep %d sec. Bye Alaa !", SLEEP_DURATION_SEC);
-    sleep_manager_configure_timer(SLEEP_DURATION_US);
+    ESP_LOGI(TAG, "[POWER] Deep Sleep %d sec. Bye Alaa !", SLEEP_BASE_SEC);
+    sleep_manager_configure_timer(SLEEP_BASE_US);
     sleep_manager_enter_deep_sleep();
 }
