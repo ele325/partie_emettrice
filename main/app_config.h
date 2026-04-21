@@ -51,4 +51,5 @@
 /* ---------- Fichier de log SD ---------- */
 #define SD_MOUNT_POINT          "/sdcard"
 #define SD_LOG_FILE             "/sdcard/log.csv"
-#define SD_LOG_HEADER           "Date;Heure;ID;Humidite(%);Temperature(C)\n"
+#define SD_LOG_HEADER \
+    "Date;Heure;ID;Humidite(%);Temperature(C);pH;EC(uS/cm);N(mg/kg);P(mg/kg);K(mg/kg)\n"

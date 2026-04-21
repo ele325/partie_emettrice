@@ -168,7 +168,7 @@ bool lora_manager_init(int cs_pin, int rst_pin, int dio0_pin)
         .clock_speed_hz = 1 * 1000 * 1000, /* 1 MHz — fiable sur Ra-02     */
         .spics_io_num   = cs_pin,           /* NSS = IO10                   */
         .queue_size     = 7,
-        .flags = SPI_DEVICE_HALFDUPLEX,               /* full-duplex                  */
+        .flags = 0 ,            /* full-duplex                  */
         .pre_cb         = NULL,
         .post_cb        = NULL,
     };
