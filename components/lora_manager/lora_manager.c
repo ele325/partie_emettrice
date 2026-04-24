@@ -86,17 +86,27 @@ static spi_device_handle_t s_spi_lora = NULL;
 
 static uint8_t lora_read_byte(uint8_t addr)
 {
-    uint8_t tx = addr & 0x7F;
-    uint8_t rx = 0;
+    /* Lecture SX1278 :
+     * envoyer [addr & 0x7F, 0x00] et récupérer l'octet utile en rx[1]. */
+    uint8_t tx_data[2] = { (uint8_t)(addr & 0x7F), 0x00 };
+    uint8_t rx_data[2] = { 0, 0 };
+
     spi_transaction_t t = {
-        .length    = 8,   // TX : 8 bits
-        .rxlength  = 8,   // RX : 8 bits
-        .tx_buffer = &tx,
-        .rx_buffer = &rx,
+        .length    = 16,  /* 2 octets TX */
+        .rxlength  = 16,  /* 2 octets RX */
+        .tx_buffer = tx_data,
+        .rx_buffer = rx_data,
         .flags     = 0,
     };
-    spi_device_transmit(s_spi_lora, &t);
-    return rx;
+
+    esp_err_t ret = spi_device_transmit(s_spi_lora, &t);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "spi_device_transmit (read 0x%02X) échoué : %s",
+                 addr, esp_err_to_name(ret));
+        return 0x00;
+    }
+
+    return rx_data[1];
 }
 
 static void lora_write_byte(uint8_t addr, uint8_t value)

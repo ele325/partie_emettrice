@@ -41,6 +41,10 @@ bool sd_manager_init(int cs_pin)
     sdmmc_host_t host   = SDSPI_HOST_DEFAULT();
     host.slot           = SPI2_HOST;
     /* host.flags → NE PAS MODIFIER — déjà correct via SDSPI_HOST_DEFAULT() */
+    /* Robustesse câblage (modules SD + fils longs) : limiter la fréquence SPI.
+     * Valeur en kHz. 10 MHz est souvent plus stable que la valeur par défaut. */
+    /* Descendre encore si TIMEOUT (0x107) : câblage/module SD parfois instable. */
+    host.max_freq_khz   = 4000;
 
     /* Slot SPI — CS et liaison au bus SPI2 */
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();

@@ -46,5 +46,7 @@
         "*.c": "c",
         "*.h": "c"
     },
-    "idf.currentSetup": "C:\\esp\\v5.5.3\\esp-idf"
+    "idf.currentSetup": "C:\\esp\\v5.5.3\\esp-idf",
+    "idf.portWin": "COM12",
+    "idf.flashType": "UART"
 }
