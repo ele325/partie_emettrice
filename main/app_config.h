@@ -22,13 +22,8 @@
 #define PIN_LORA_RST            9
 #define PIN_LORA_IRQ            14
 
-/*
- * CORRECTION : IO34 est input-only sur ESP32-S2
- * Schéma montre NSS_SD sur IO34 → on le déplace sur IO35
- * OU utiliser IO38 si disponible
- * ⚠️  À adapter selon ton routage PCB réel
- */
-#define PIN_SD_CS               5    /* PCB: NSS soudé sur IO34 (input-only) → re-câbler vers IO5 */
+
+#define PIN_SD_CS               34  /* PCB: NSS soudé sur IO34 (input-only) → re-câbler vers IO5 */
 
 /* ---------- GPIO - Capteur BGT-SMPS (MODBUS RS485) ---------- */
 #define PIN_MODBUS_RX           18
